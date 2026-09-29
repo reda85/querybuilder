@@ -1,99 +1,24 @@
 import "server-only";
-import { DatabaseSync } from "node:sqlite";
-import { schemaDDL, universe } from "./universe";
+import type { DatabaseSync } from "node:sqlite";
+import type { Pool } from "pg";
+import { generateDemoData } from "./demoData";
+import { schemaDDL, universe, type Dialect } from "./universe";
 
-// In-memory demo database, seeded deterministically so results are stable
-// across restarts. Replace this module to point the app at a real database.
+// Two backends behind one read-only API:
+// - PostgreSQL (e.g. Supabase) when DATABASE_URL is set;
+// - otherwise an in-memory SQLite database seeded with the demo data.
 
-let db: DatabaseSync | null = null;
-
-function rng(seed: number) {
-  return () => {
-    seed = (seed * 1664525 + 1013904223) % 4294967296;
-    return seed / 4294967296;
-  };
-}
-
-const FIRST = ["Camille", "Louis", "Emma", "Hugo", "Léa", "Lucas", "Chloé", "Nathan", "Inès", "Jules", "Sarah", "Adam", "Manon", "Yanis", "Lina", "Karim", "Sofia", "Omar", "Julie", "Thomas"];
-const LAST = ["Martin", "Bernard", "Dubois", "Durand", "Lefebvre", "Moreau", "Laurent", "Simon", "Michel", "Garcia", "Benali", "Roux", "Fournier", "Girard", "Bonnet", "Mercier", "Haddad", "Lambert"];
-const PLACES: [string, string][] = [
-  ["France", "Paris"], ["France", "Lyon"], ["France", "Marseille"], ["France", "Lille"], ["France", "Bordeaux"],
-  ["Belgique", "Bruxelles"], ["Belgique", "Liège"], ["Suisse", "Genève"], ["Suisse", "Lausanne"],
-  ["Maroc", "Casablanca"], ["Maroc", "Rabat"], ["Canada", "Montréal"], ["Canada", "Québec"],
-];
-const SEGMENTS = ["Particulier", "Particulier", "Particulier", "Professionnel", "VIP"];
-const CATALOG: [string, string, string, number][] = [
-  ["T-shirt coton bio", "Vêtements", "Hauts", 19.9],
-  ["Chemise lin", "Vêtements", "Hauts", 49.0],
-  ["Pull mérinos", "Vêtements", "Hauts", 79.0],
-  ["Jean slim", "Vêtements", "Bas", 59.0],
-  ["Chino", "Vêtements", "Bas", 45.0],
-  ["Short de bain", "Vêtements", "Bas", 29.0],
-  ["Veste en jean", "Vêtements", "Manteaux", 89.0],
-  ["Parka", "Vêtements", "Manteaux", 169.0],
-  ["Baskets cuir", "Chaussures", "Sport", 99.0],
-  ["Running", "Chaussures", "Sport", 119.0],
-  ["Mocassins", "Chaussures", "Ville", 129.0],
-  ["Bottines", "Chaussures", "Ville", 149.0],
-  ["Sac cabas", "Accessoires", "Sacs", 69.0],
-  ["Sac à dos", "Accessoires", "Sacs", 59.0],
-  ["Ceinture cuir", "Accessoires", "Petite maroquinerie", 35.0],
-  ["Portefeuille", "Accessoires", "Petite maroquinerie", 39.0],
-  ["Casquette", "Accessoires", "Chapeaux", 22.0],
-  ["Bonnet laine", "Accessoires", "Chapeaux", 25.0],
-];
-const STATUSES = ["Livrée", "Livrée", "Livrée", "Livrée", "Expédiée", "En attente", "Annulée"];
-const CHANNELS = ["Web", "Web", "Mobile", "Magasin"];
-
-function iso(d: Date) {
-  return d.toISOString().slice(0, 10);
-}
-
-function seed(d: DatabaseSync) {
-  const r = rng(42);
-  const pick = <T,>(arr: T[]) => arr[Math.floor(r() * arr.length)];
-
-  d.exec("BEGIN");
-  const insC = d.prepare("INSERT INTO customers VALUES (?, ?, ?, ?, ?, ?, ?)");
-  for (let i = 1; i <= 120; i++) {
-    const first = pick(FIRST);
-    const last = pick(LAST);
-    const [country, city] = pick(PLACES);
-    const created = new Date(Date.UTC(2022, 0, 1) + Math.floor(r() * 900) * 86400000);
-    insC.run(i, `${first} ${last}`, `${first}.${last}${i}@example.com`.toLowerCase(), country, city, pick(SEGMENTS), iso(created));
-  }
-
-  const insP = d.prepare("INSERT INTO products VALUES (?, ?, ?, ?, ?)");
-  CATALOG.forEach(([name, cat, sub, price], i) => insP.run(i + 1, name, cat, sub, price));
-
-  const insO = d.prepare("INSERT INTO orders VALUES (?, ?, ?, ?, ?)");
-  const insI = d.prepare("INSERT INTO order_items VALUES (?, ?, ?, ?, ?, ?)");
-  let itemId = 1;
-  for (let o = 1; o <= 1500; o++) {
-    const date = new Date(Date.UTC(2023, 0, 1) + Math.floor(r() * 1000) * 86400000);
-    insO.run(o, 1 + Math.floor(r() * 120), iso(date), pick(STATUSES), pick(CHANNELS));
-    const lines = 1 + Math.floor(r() * 4);
-    for (let l = 0; l < lines; l++) {
-      const p = Math.floor(r() * CATALOG.length);
-      const discount = r() < 0.7 ? 0 : pick([0.05, 0.1, 0.15, 0.2, 0.3]);
-      insI.run(itemId++, o, p + 1, 1 + Math.floor(r() * 3), CATALOG[p][3], discount);
-    }
-  }
-  d.exec("COMMIT");
-}
-
-export function getDb(): DatabaseSync {
-  if (!db) {
-    db = new DatabaseSync(":memory:");
-    db.exec(schemaDDL(universe));
-    seed(db);
-  }
-  return db;
+export interface QueryRows {
+  columns: string[];
+  rows: unknown[][];
+  truncated: boolean;
 }
 
 const MAX_ROWS = 1000;
 
-export function runReadOnlyQuery(sql: string) {
+export const dialect: Dialect = process.env.DATABASE_URL ? "postgres" : "sqlite";
+
+function checkReadOnly(sql: string): string {
   const cleaned = sql.trim().replace(/;\s*$/, "");
   if (!/^(select|with)\b/i.test(cleaned)) {
     throw new Error("Seules les requêtes SELECT (ou WITH … SELECT) sont autorisées.");
@@ -101,7 +26,33 @@ export function runReadOnlyQuery(sql: string) {
   if (cleaned.includes(";")) {
     throw new Error("Une seule instruction SQL est autorisée.");
   }
-  const stmt = getDb().prepare(cleaned);
+  return cleaned;
+}
+
+/* ----------------------------- SQLite ----------------------------- */
+
+let sqlite: DatabaseSync | null = null;
+
+async function getSqlite(): Promise<DatabaseSync> {
+  if (!sqlite) {
+    const { DatabaseSync } = await import("node:sqlite");
+    const d = new DatabaseSync(":memory:");
+    d.exec(schemaDDL(universe, "sqlite"));
+    const data = generateDemoData();
+    d.exec("BEGIN");
+    for (const [table, rows] of Object.entries(data)) {
+      if (!rows.length) continue;
+      const stmt = d.prepare(`INSERT INTO ${table} VALUES (${rows[0].map(() => "?").join(", ")})`);
+      for (const row of rows) stmt.run(...row);
+    }
+    d.exec("COMMIT");
+    sqlite = d;
+  }
+  return sqlite;
+}
+
+async function sqliteQuery(sql: string): Promise<QueryRows> {
+  const stmt = (await getSqlite()).prepare(sql);
   const columns = stmt.columns().map((c) => c.name);
   const rows: unknown[][] = [];
   let truncated = false;
@@ -115,9 +66,70 @@ export function runReadOnlyQuery(sql: string) {
   return { columns, rows, truncated };
 }
 
+/* ---------------------------- PostgreSQL --------------------------- */
+
+let pool: Pool | null = null;
+
+async function getPool(): Promise<Pool> {
+  if (!pool) {
+    const pg = (await import("pg")).default;
+    // Return numbers as numbers (COUNT is bigint, ROUND/SUM on NUMERIC is numeric)
+    // and dates as plain YYYY-MM-DD strings, like SQLite does.
+    pg.types.setTypeParser(pg.types.builtins.INT8, Number);
+    pg.types.setTypeParser(pg.types.builtins.NUMERIC, Number);
+    pg.types.setTypeParser(pg.types.builtins.DATE, (v: string) => v);
+
+    // sslmode in the URL would override the `ssl` option below, so drop it.
+    const url = new URL(process.env.DATABASE_URL!);
+    url.searchParams.delete("sslmode");
+    const local = ["localhost", "127.0.0.1"].includes(url.hostname);
+    const ca = process.env.DATABASE_CA_CERT;
+
+    pool = new pg.Pool({
+      connectionString: url.toString(),
+      max: 3,
+      idleTimeoutMillis: 10_000,
+      // Supabase requires TLS. Its certificate is signed by Supabase's own CA:
+      // set DATABASE_CA_CERT (the PEM from the dashboard) to verify it.
+      ssl: local ? undefined : ca ? { ca } : { rejectUnauthorized: false },
+    });
+  }
+  return pool;
+}
+
+async function postgresQuery(sql: string): Promise<QueryRows> {
+  const client = await (await getPool()).connect();
+  try {
+    // Defence in depth on top of the read-only database role.
+    await client.query("BEGIN READ ONLY");
+    await client.query("SET LOCAL statement_timeout = '10s'");
+    const res = await client.query({
+      text: `SELECT * FROM (\n${sql}\n) AS q LIMIT ${MAX_ROWS + 1}`,
+      rowMode: "array",
+    });
+    await client.query("ROLLBACK");
+    const rows = res.rows as unknown[][];
+    return { columns: res.fields.map((f) => f.name), rows: rows.slice(0, MAX_ROWS), truncated: rows.length > MAX_ROWS };
+  } catch (e) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/* ------------------------------ API ------------------------------- */
+
+export async function runReadOnlyQuery(sql: string): Promise<QueryRows> {
+  const cleaned = checkReadOnly(sql);
+  return dialect === "postgres" ? postgresQuery(cleaned) : sqliteQuery(cleaned);
+}
+
+let sampleCache: string | null = null;
+
 /** Distinct values of low-cardinality text columns, to ground the AI assistant. */
-export function sampleValues(): string {
-  const d = getDb();
+export async function sampleValues(): Promise<string> {
+  if (sampleCache) return sampleCache;
   const cols: [string, string][] = [
     ["customers", "country"],
     ["customers", "city"],
@@ -127,14 +139,13 @@ export function sampleValues(): string {
     ["orders", "status"],
     ["orders", "channel"],
   ];
-  const lines = cols.map(([t, c]) => {
-    const vals = d
-      .prepare(`SELECT DISTINCT ${c} AS v FROM ${t} ORDER BY 1`)
-      .all()
-      .map((r) => String((r as { v: unknown }).v));
-    return `${t}.${c}: ${vals.join(", ")}`;
-  });
-  const range = d.prepare("SELECT MIN(order_date) AS a, MAX(order_date) AS b FROM orders").get() as { a: string; b: string };
-  lines.push(`orders.order_date: de ${range.a} à ${range.b}`);
-  return lines.join("\n");
+  const lines: string[] = [];
+  for (const [t, c] of cols) {
+    const { rows } = await runReadOnlyQuery(`SELECT DISTINCT ${c} FROM ${t} ORDER BY 1`);
+    lines.push(`${t}.${c}: ${rows.map((r) => String(r[0])).join(", ")}`);
+  }
+  const { rows } = await runReadOnlyQuery("SELECT MIN(order_date), MAX(order_date) FROM orders");
+  lines.push(`orders.order_date: de ${rows[0][0]} à ${rows[0][1]}`);
+  sampleCache = lines.join("\n");
+  return sampleCache;
 }

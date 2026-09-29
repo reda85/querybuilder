@@ -1,6 +1,11 @@
 // Semantic layer ("univers") on top of the physical schema, in the spirit of
 // SAP BusinessObjects: business-friendly classes and objects that map to SQL
 // expressions, plus the joins needed to connect the underlying tables.
+//
+// Object expressions are written in portable SQL that runs unchanged on both
+// SQLite (local demo) and PostgreSQL (Supabase).
+
+export type Dialect = "sqlite" | "postgres";
 
 export type DataType = "string" | "number" | "date";
 export type ObjectKind = "dimension" | "measure" | "detail";
@@ -137,9 +142,9 @@ export const universe: Universe = {
       objects: [
         { id: "commande.id", name: "N° commande", kind: "dimension", dataType: "number", select: "orders.id", tables: ["orders"] },
         { id: "commande.date", name: "Date commande", kind: "dimension", dataType: "date", select: "orders.order_date", tables: ["orders"] },
-        { id: "commande.annee", name: "Année", kind: "dimension", dataType: "string", select: "strftime('%Y', orders.order_date)", tables: ["orders"] },
-        { id: "commande.trimestre", name: "Trimestre", kind: "dimension", dataType: "string", select: "'T' || ((CAST(strftime('%m', orders.order_date) AS INTEGER) + 2) / 3)", tables: ["orders"] },
-        { id: "commande.mois", name: "Mois", kind: "dimension", dataType: "string", select: "strftime('%Y-%m', orders.order_date)", tables: ["orders"] },
+        { id: "commande.annee", name: "Année", kind: "dimension", dataType: "string", select: "substr(CAST(orders.order_date AS TEXT), 1, 4)", tables: ["orders"] },
+        { id: "commande.trimestre", name: "Trimestre", kind: "dimension", dataType: "string", select: "'T' || ((CAST(substr(CAST(orders.order_date AS TEXT), 6, 2) AS INTEGER) + 2) / 3)", tables: ["orders"] },
+        { id: "commande.mois", name: "Mois", kind: "dimension", dataType: "string", select: "substr(CAST(orders.order_date AS TEXT), 1, 7)", tables: ["orders"] },
         { id: "commande.statut", name: "Statut", kind: "dimension", dataType: "string", select: "orders.status", tables: ["orders"] },
         { id: "commande.canal", name: "Canal", kind: "dimension", dataType: "string", select: "orders.channel", tables: ["orders"] },
         { id: "commande.nb", name: "Nombre de commandes", kind: "measure", dataType: "number", select: "COUNT(DISTINCT orders.id)", tables: ["orders"] },
@@ -166,11 +171,18 @@ export function getObject(id: string): UniverseObject | undefined {
   return objectIndex.get(id);
 }
 
-export function schemaDDL(u: Universe = universe): string {
+const PG_TYPES: Record<Column["type"], string> = {
+  INTEGER: "INTEGER",
+  REAL: "NUMERIC(10, 2)",
+  TEXT: "TEXT",
+  DATE: "DATE",
+};
+
+export function schemaDDL(u: Universe = universe, dialect: Dialect = "sqlite"): string {
   return u.tables
     .map((t) => {
       const cols = t.columns.map((c, i) => {
-        let line = `  ${c.name} ${c.type}`;
+        let line = `  ${c.name} ${dialect === "postgres" ? PG_TYPES[c.type] : c.type}`;
         if (c.pk) line += " PRIMARY KEY";
         if (c.references) {
           const [rt, rc] = c.references.split(".");

@@ -9,7 +9,7 @@ export async function POST(request: Request) {
   }
   const started = performance.now();
   try {
-    const result = runReadOnlyQuery(sql);
+    const result = await runReadOnlyQuery(sql);
     return Response.json({ ...result, durationMs: Math.round(performance.now() - started) });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });

@@ -1,24 +1,31 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { sampleValues } from "@/lib/db";
+import { dialect, sampleValues } from "@/lib/db";
 import { schemaDDL, universe, universeSummary } from "@/lib/universe";
 
 export const runtime = "nodejs";
+// Streaming answers can take a while; lets Vercel keep the function alive.
+export const maxDuration = 120;
 
-function systemPrompt() {
+const DIALECT_HINT = {
+  sqlite: "SQLite (utilise la syntaxe SQLite, par ex. strftime pour les dates stockées en texte YYYY-MM-DD)",
+  postgres: "PostgreSQL (utilise la syntaxe PostgreSQL : EXTRACT, date_trunc, to_char pour les dates ; les colonnes de date sont de type DATE)",
+};
+
+async function systemPrompt() {
   return `Tu es un assistant SQL intégré à un outil de requêtage façon SAP BusinessObjects.
 L'utilisateur décrit en langage naturel les données qu'il veut ; tu écris la requête SQL correspondante.
 
-Base de données : SQLite (utilise la syntaxe SQLite, par ex. strftime pour les dates stockées en texte YYYY-MM-DD).
+Base de données : ${DIALECT_HINT[dialect]}.
 
 ## Schéma physique
-${schemaDDL(universe)}
+${schemaDDL(universe, dialect)}
 
 ## Univers « ${universe.name} » (objets métier et leur expression SQL)
 Réutilise ces expressions quand la demande correspond à un objet métier, afin que les chiffres restent cohérents avec le reste de l'outil.
 ${universeSummary(universe)}
 
 ## Valeurs présentes dans la base
-${sampleValues()}
+${await sampleValues()}
 
 ## Règles de réponse
 - Réponds dans la langue de l'utilisateur, en une ou deux phrases qui expliquent la logique.
@@ -45,7 +52,7 @@ export async function POST(request: Request) {
           output_config: { effort: "medium" },
           betas: ["server-side-fallback-2026-07-01"],
           fallbacks: "default",
-          system: [{ type: "text", text: systemPrompt(), cache_control: { type: "ephemeral" } }],
+          system: [{ type: "text", text: await systemPrompt(), cache_control: { type: "ephemeral" } }],
           messages,
         });
         for await (const event of stream) {

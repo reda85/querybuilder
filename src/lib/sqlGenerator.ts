@@ -127,7 +127,8 @@ function filterCondition(f: Filter, obj: UniverseObject): string | null {
       .filter(Boolean)
       .map((v) => quote(v, obj))
       .join(", ");
-  const like = (pattern: string) => `'${pattern.replace(/'/g, "''")}'`;
+  // LOWER() on both sides gives the same case-insensitive match on SQLite and PostgreSQL.
+  const like = (pattern: string) => `LOWER(${expr}) LIKE LOWER('${pattern.replace(/'/g, "''")}')`;
 
   switch (f.operator) {
     case "IS NULL":
@@ -139,9 +140,9 @@ function filterCondition(f: Filter, obj: UniverseObject): string | null {
       return l ? `${expr} ${f.operator} (${l})` : null;
     }
     case "CONTAINS":
-      return f.value.trim() ? `${expr} LIKE ${like(`%${f.value.trim()}%`)}` : null;
+      return f.value.trim() ? like(`%${f.value.trim()}%`) : null;
     case "STARTS WITH":
-      return f.value.trim() ? `${expr} LIKE ${like(`${f.value.trim()}%`)}` : null;
+      return f.value.trim() ? like(`${f.value.trim()}%`) : null;
     case "BETWEEN":
       return f.value.trim() && f.value2.trim()
         ? `${expr} BETWEEN ${quote(f.value, obj)} AND ${quote(f.value2, obj)}`
